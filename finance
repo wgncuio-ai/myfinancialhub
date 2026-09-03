@@ -1,0 +1,1420 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Family Finance Hub</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>\U0001F4B0</text></svg>" />
+<style>
+  * { box-sizing: border-box; }
+  html, body, #root { margin: 0; padding: 0; min-height: 100%; }
+  body { background: #F2F4F0; }
+  #boot { font-family: system-ui, sans-serif; color: #6B7A72; text-align: center; padding: 80px 20px; }
+</style>
+<!-- React + ReactDOM (production UMD) -->
+<script crossorigin src="https://cdnjs.cloudflare.com/ajax/libs/react/18.3.1/umd/react.production.min.js"></script>
+<script crossorigin src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.3.1/umd/react-dom.production.min.js"></script>
+<!-- SheetJS for Excel export -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<!-- Lucide icon data (UMD global: window.lucide) -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/lucide/0.294.0/lucide.min.js"></script>
+<!-- Babel to compile the JSX below in-browser -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.7/babel.min.js"></script>
+</head>
+<body>
+<div id="root"><div id="boot">Loading Family Finance Hub\u2026</div></div>
+
+<script type="text/babel" data-presets="react">
+const { useState, useEffect, useMemo, useCallback } = React;
+
+// --- Icon shim: renders lucide icon data as an inline SVG React element ---
+function Icon({ name, size = 16, color = "currentColor", style }) {
+  const data = window.lucide && window.lucide.icons ? window.lucide.icons[name] : null;
+  if (!data) {
+    // fallback: empty box so layout doesn't break if an icon name is missing
+    return React.createElement("svg", { width: size, height: size, style });
+  }
+  // lucide icon data is [tag, attrs, children?] node arrays
+  const toEl = (node, key) => {
+    const [tag, attrs, children] = node;
+    return React.createElement(tag, { ...attrs, key },
+      Array.isArray(children) ? children.map((c, i) => toEl(c, i)) : null);
+  };
+  const children = data.map ? data.map((n, i) => toEl(n, i)) : [];
+  return React.createElement("svg", {
+    xmlns: "http://www.w3.org/2000/svg", width: size, height: size,
+    viewBox: "0 0 24 24", fill: "none", stroke: color, strokeWidth: 2,
+    strokeLinecap: "round", strokeLinejoin: "round", style,
+  }, children);
+}
+
+
+// ---------- Design tokens ----------
+const T = {
+  pine: "#123B2A",
+  pineMid: "#1D5C42",
+  pineSoft: "#EAF1EC",
+  paper: "#F2F4F0",
+  card: "#FFFFFF",
+  ink: "#1C2B24",
+  muted: "#6B7A72",
+  line: "#E2E6E0",
+  amber: "#B97E12",
+  amberSoft: "#FBF3E2",
+  red: "#B3372E",
+  redSoft: "#F9ECEA",
+  mono: "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace",
+};
+
+const STORAGE_KEY = "family-finance-v1";
+
+function thisMonthConst() { return new Date().toISOString().slice(0, 7); }
+
+const DEFAULT_CATEGORIES = [
+  "Groceries", "Dining Out", "Transport & Fuel", "Utilities & Bills",
+  "Kids & Education", "Health & Insurance", "Shopping", "Household",
+  "Entertainment", "Travel", "Giving & Family", "Others",
+];
+
+const DEFAULT_DATA = {
+  transactions: [],
+  budgets: {},
+  goals: [],
+  assets: [],
+  liabilities: [],
+  loans: [],
+  snapshots: [],
+  pool: { topup: 0, startMonth: thisMonthConst(), entries: [] },
+  cards: ["Credit Card 1", "Cash / Debit"],
+  categories: DEFAULT_CATEGORIES,
+};
+
+const PERSONAL_CATEGORIES = [
+  "Dining & Coffee", "Transport & Fuel", "Shopping & Personal",
+  "Health & Grooming", "Hobbies", "Subscriptions", "Aquascaping",
+  "Side Venture", "Gifts", "Others",
+];
+
+const WORKSPACES = [
+  { id: "family", label: "Family", eyebrow: "Goh Family Ledger", accent: "#123B2A" },
+  { id: "personal", label: "Personal", eyebrow: "William · Personal Ledger", accent: "#3B2A6B" },
+];
+
+const makeDefault = (wsId) =>
+  wsId === "personal"
+    ? { ...structuredClone(DEFAULT_DATA), categories: PERSONAL_CATEGORIES, cards: ["Personal card", "Cash"] }
+    : structuredClone(DEFAULT_DATA);
+
+// ---------- Helpers ----------
+const fmtRM = (n) =>
+  "RM " + (Number(n) || 0).toLocaleString("en-MY", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+
+const thisMonth = () => new Date().toISOString().slice(0, 7);
+const todayStr = () => new Date().toISOString().slice(0, 10);
+const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
+
+const monthLabel = (ym) => {
+  if (!ym) return "";
+  const [y, m] = ym.split("-");
+  const names = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+  return `${names[parseInt(m, 10) - 1]} ${y}`;
+};
+
+const parseDate = (raw) => {
+  const s = (raw || "").trim();
+  let m = s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/);
+  if (m) return `${m[1]}-${m[2].padStart(2, "0")}-${m[3].padStart(2, "0")}`;
+  m = s.match(/^(\d{1,2})[\/\-.](\d{1,2})[\/\-.](\d{4})$/);
+  if (m) return `${m[3]}-${m[2].padStart(2, "0")}-${m[1].padStart(2, "0")}`;
+  m = s.match(/^(\d{1,2})[\/\-.](\d{1,2})[\/\-.](\d{2})$/);
+  if (m) return `20${m[3]}-${m[2].padStart(2, "0")}-${m[1].padStart(2, "0")}`;
+  return null;
+};
+
+const parseAmount = (raw) => {
+  const cleaned = (raw || "").replace(/rm/i, "").replace(/,/g, "").trim();
+  const n = parseFloat(cleaned);
+  return isNaN(n) ? null : Math.abs(n);
+};
+
+// ---------- Small UI atoms ----------
+const Card = ({ children, style }) => (
+  <div
+    style={{
+      background: T.card, border: `1px solid ${T.line}`, borderRadius: 10,
+      padding: 16, ...style,
+    }}
+  >
+    {children}
+  </div>
+);
+
+const Eyebrow = ({ children }) => (
+  <div style={{
+    fontSize: 11, letterSpacing: "0.08em", textTransform: "uppercase",
+    color: T.muted, fontWeight: 600, marginBottom: 6,
+  }}>{children}</div>
+);
+
+const MonoNum = ({ children, size = 22, color = T.ink, weight = 600 }) => (
+  <div style={{ fontFamily: T.mono, fontSize: size, color, fontWeight: weight, fontVariantNumeric: "tabular-nums" }}>
+    {children}
+  </div>
+);
+
+const Btn = ({ children, onClick, kind = "primary", small, disabled, type }) => {
+  const styles = {
+    primary: { background: T.pine, color: "#fff", border: `1px solid ${T.pine}` },
+    ghost: { background: "transparent", color: T.pine, border: `1px solid ${T.line}` },
+    danger: { background: "transparent", color: T.red, border: "1px solid transparent" },
+  }[kind];
+  return (
+    <button
+      type={type || "button"}
+      onClick={onClick}
+      disabled={disabled}
+      style={{
+        ...styles, borderRadius: 8, cursor: disabled ? "not-allowed" : "pointer",
+        padding: small ? "5px 10px" : "9px 16px", fontSize: small ? 12.5 : 14,
+        fontWeight: 600, display: "inline-flex", alignItems: "center", gap: 6,
+        opacity: disabled ? 0.5 : 1,
+      }}
+    >
+      {children}
+    </button>
+  );
+};
+
+const inputStyle = {
+  border: `1px solid ${T.line}`, borderRadius: 8, padding: "8px 10px",
+  fontSize: 14, color: T.ink, background: "#fff", outline: "none", width: "100%",
+};
+
+const Field = ({ label, children }) => (
+  <label style={{ display: "block", flex: 1, minWidth: 130 }}>
+    <div style={{ fontSize: 12, color: T.muted, marginBottom: 4, fontWeight: 600 }}>{label}</div>
+    {children}
+  </label>
+);
+
+const Bar = ({ pct, over }) => (
+  <div style={{ height: 8, background: T.pineSoft, borderRadius: 99, overflow: "hidden" }}>
+    <div style={{
+      height: "100%", width: `${Math.min(pct, 100)}%`,
+      background: over ? T.red : T.pineMid, borderRadius: 99,
+      transition: "width 0.4s ease",
+    }} />
+  </div>
+);
+
+// Rebuild the pool passbook (auto top-ups + manual entries) for export — mirrors the Pool tab
+function buildPoolLedger(pool) {
+  if (!pool) return [];
+  const rows = [];
+  const topup = Number(pool.topup) || 0;
+  if (topup > 0 && pool.startMonth) {
+    let [y, m] = pool.startMonth.split("-").map(Number);
+    const [cy, cm] = thisMonthConst().split("-").map(Number);
+    let guard = 0;
+    while ((y < cy || (y === cy && m <= cm)) && guard < 600) {
+      const ym = `${y}-${String(m).padStart(2, "0")}`;
+      if (!(pool.skipTopups || []).includes(ym)) {
+        rows.push({ id: `topup-${ym}`, date: `${ym}-01`, type: "topup", desc: "Monthly top-up", amount: topup });
+      }
+      m++; if (m > 12) { m = 1; y++; }
+      guard++;
+    }
+  }
+  (pool.entries || []).forEach((e) => rows.push(e));
+  rows.sort((a, b) => (a.date + a.id).localeCompare(b.date + b.id));
+  let run = 0;
+  return rows.map((r) => {
+    const isIn = r.type === "topup" || r.type === "adjust-in";
+    run += isIn ? r.amount : -r.amount;
+    return {
+      Date: r.date,
+      Detail: r.desc,
+      In: isIn ? r.amount : "",
+      Out: !isIn ? r.amount : "",
+      Balance: run,
+    };
+  });
+}
+
+function exportToExcel(workspaces) {
+  const wb = XLSX.utils.book_new();
+  const addSheet = (name, rows) => {
+    // Excel sheet names max 31 chars, no special chars
+    const safe = name.replace(/[\\/?*[\]:]/g, "").slice(0, 31);
+    const ws = XLSX.utils.json_to_sheet(rows.length ? rows : [{ Note: "No data" }]);
+    XLSX.utils.book_append_sheet(wb, ws, safe);
+  };
+
+  ["family", "personal"].forEach((wsId) => {
+    const d = workspaces[wsId];
+    if (!d) return;
+    const tag = wsId === "family" ? "Fam" : "Pers";
+
+    addSheet(`${tag} Transactions`, (d.transactions || []).map((t) => ({
+      Date: t.date, Description: t.desc, Category: t.category, Card: t.method, Amount: t.amount,
+    })));
+
+    addSheet(`${tag} Budgets`, (d.categories || []).map((c) => ({
+      Category: c, "Monthly Budget": Number(d.budgets?.[c]) || 0,
+    })));
+
+    addSheet(`${tag} Goals`, (d.goals || []).map((g) => ({
+      Goal: g.name, Target: g.target, Saved: g.saved,
+      "% Complete": g.target ? Math.round((g.saved / g.target) * 100) : 0,
+      "Target Date": g.targetDate || "",
+    })));
+
+    addSheet(`${tag} Loans`, (d.loans || []).map((l) => ({
+      Loan: l.name, Outstanding: l.balance, "Original Amount": l.original,
+      "Monthly Installment": l.installment, "Rate % p.a.": l.rate,
+      "Paid Down": (l.original || 0) - l.balance,
+    })));
+
+    const loanPayments = [];
+    (d.loans || []).forEach((l) => (l.payments || []).forEach((p) => loanPayments.push({
+      Loan: l.name, Date: p.date, Paid: p.amount, Interest: p.interest,
+      Principal: p.principal, "Balance After": p.balanceAfter,
+    })));
+    addSheet(`${tag} Loan Payments`, loanPayments);
+
+    addSheet(`${tag} Assets`, (d.assets || []).map((a) => ({ Asset: a.name, Type: a.type, Value: a.value })));
+    addSheet(`${tag} Liabilities`, (d.liabilities || []).map((x) => ({ Liability: x.name, Balance: x.value })));
+
+    addSheet(`${tag} Net Worth Trend`, (d.snapshots || []).map((s) => ({
+      Month: s.month, Assets: s.assets, Liabilities: s.liabilities, "Net Worth": s.net,
+    })));
+
+    if (wsId === "family") {
+      addSheet("Fam Pool Passbook", buildPoolLedger(d.pool));
+    }
+  });
+
+  const stamp = new Date().toISOString().slice(0, 10);
+  XLSX.writeFile(wb, `finance-hub-backup-${stamp}.xlsx`);
+}
+
+// ---------- Main App ----------
+function FamilyFinanceHub() {
+  const [workspaces, setWorkspaces] = useState({ family: makeDefault("family"), personal: makeDefault("personal") });
+  const [activeWs, setActiveWs] = useState("family");
+  const [loaded, setLoaded] = useState(false);
+  const [saveState, setSaveState] = useState("idle"); // idle | saving | saved | error
+  const [tab, setTab] = useState("dashboard");
+  const [month, setMonth] = useState(thisMonth());
+
+  const data = workspaces[activeWs];
+  const wsMeta = WORKSPACES.find((w) => w.id === activeWs);
+
+  // ----- Load from persistent storage -----
+  useEffect(() => {
+    (async () => {
+      try {
+        const raw = localStorage.getItem(STORAGE_KEY);
+        if (raw) {
+          const parsed = JSON.parse(raw);
+          if (parsed && parsed.workspaces) {
+            // New multi-workspace format
+            setWorkspaces({
+              family: { ...makeDefault("family"), ...parsed.workspaces.family },
+              personal: { ...makeDefault("personal"), ...parsed.workspaces.personal },
+            });
+            if (parsed.activeWs) setActiveWs(parsed.activeWs);
+          } else {
+            // Migrate old single-ledger data into the Family workspace
+            setWorkspaces((w) => ({ ...w, family: { ...makeDefault("family"), ...parsed } }));
+          }
+        }
+      } catch (e) {
+        // Key doesn't exist yet — first run, start fresh
+      }
+      setLoaded(true);
+    })();
+  }, []);
+
+  // ----- Save on change -----
+  useEffect(() => {
+    if (!loaded) return;
+    let cancelled = false;
+    setSaveState("saving");
+    const t = setTimeout(async () => {
+      try {
+        localStorage.setItem(STORAGE_KEY, JSON.stringify({ workspaces, activeWs }));
+        if (!cancelled) setSaveState("saved");
+      } catch (e) {
+        if (!cancelled) setSaveState("error");
+      }
+    }, 500);
+    return () => { cancelled = true; clearTimeout(t); };
+  }, [workspaces, activeWs, loaded]);
+
+  const update = useCallback((fn) => {
+    setWorkspaces((all) => {
+      const next = structuredClone(all);
+      next[activeWs] = fn(next[activeWs]);
+      return next;
+    });
+  }, [activeWs]);
+
+  // ----- Derived -----
+  const monthTx = useMemo(
+    () => data.transactions.filter((t) => t.date && t.date.startsWith(month)),
+    [data.transactions, month]
+  );
+  const monthTotal = monthTx.reduce((s, t) => s + t.amount, 0);
+  const byCategory = useMemo(() => {
+    const m = {};
+    monthTx.forEach((t) => { m[t.category] = (m[t.category] || 0) + t.amount; });
+    return m;
+  }, [monthTx]);
+  const byCard = useMemo(() => {
+    const m = {};
+    monthTx.forEach((t) => { m[t.method] = (m[t.method] || 0) + t.amount; });
+    return m;
+  }, [monthTx]);
+  const budgetTotal = Object.values(data.budgets).reduce((s, v) => s + (Number(v) || 0), 0);
+  const assetsTotal = data.assets.reduce((s, a) => s + a.value, 0);
+  const liabTotal =
+    data.liabilities.reduce((s, l) => s + l.value, 0) +
+    (data.loans || []).reduce((s, l) => s + l.balance, 0);
+  const netWorth = assetsTotal - liabTotal;
+
+  const monthOptions = useMemo(() => {
+    const set = new Set(data.transactions.map((t) => t.date && t.date.slice(0, 7)).filter(Boolean));
+    set.add(thisMonth());
+    set.add(month);
+    return Array.from(set).sort().reverse();
+  }, [data.transactions, month]);
+
+  if (!loaded) {
+    return (
+      <div style={{ minHeight: "100vh", background: T.paper, display: "flex", alignItems: "center", justifyContent: "center", color: T.muted, fontFamily: "system-ui, sans-serif" }}>
+        Opening your ledger…
+      </div>
+    );
+  }
+
+  const tabs = [
+    { id: "dashboard", label: "Dashboard", icon: "layout-dashboard" },
+    { id: "expenses", label: "Expenses", icon: "receipt-text" },
+    { id: "budget", label: "Budget", icon: "wallet" },
+    ...(activeWs === "family" ? [{ id: "pool", label: "Pool", icon: "banknote" }] : []),
+    { id: "goals", label: "Goals", icon: "target" },
+    { id: "networth", label: "Net Worth", icon: "landmark" },
+  ];
+
+  return (
+    <div style={{ minHeight: "100vh", background: T.paper, fontFamily: "system-ui, -apple-system, sans-serif", color: T.ink }}>
+      {/* Header */}
+      <div style={{ background: wsMeta.accent, color: "#fff", padding: "18px 20px 0", transition: "background 0.3s ease" }}>
+        <div style={{ maxWidth: 980, margin: "0 auto" }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", flexWrap: "wrap", gap: 8 }}>
+            <div>
+              <div style={{ fontSize: 11, letterSpacing: "0.12em", textTransform: "uppercase", opacity: 0.7, fontWeight: 600 }}>
+                {wsMeta.eyebrow}
+              </div>
+              <div style={{ fontSize: 22, fontWeight: 700, marginTop: 2 }}>Finance Hub</div>
+            </div>
+            <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 8 }}>
+              {/* Workspace switcher */}
+              <div style={{ display: "flex", background: "rgba(0,0,0,0.22)", borderRadius: 99, padding: 3 }}>
+                {WORKSPACES.map((w) => (
+                  <button
+                    key={w.id}
+                    onClick={() => { setActiveWs(w.id); setTab("dashboard"); setMonth(thisMonth()); }}
+                    style={{
+                      border: "none", cursor: "pointer", padding: "6px 16px", borderRadius: 99,
+                      fontSize: 13, fontWeight: 700, transition: "all 0.2s ease",
+                      background: activeWs === w.id ? "#fff" : "transparent",
+                      color: activeWs === w.id ? w.accent : "rgba(255,255,255,0.8)",
+                    }}
+                  >
+                    {w.label}
+                  </button>
+                ))}
+              </div>
+              <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                <button
+                  onClick={() => exportToExcel(workspaces)}
+                  style={{
+                    display: "inline-flex", alignItems: "center", gap: 5, cursor: "pointer",
+                    background: "rgba(255,255,255,0.14)", color: "#fff", border: "1px solid rgba(255,255,255,0.35)",
+                    borderRadius: 7, padding: "5px 10px", fontSize: 12, fontWeight: 600,
+                  }}
+                  title="Download an Excel backup of both workspaces"
+                >
+                  <Icon name="download" size={13} /> Export Excel
+                </button>
+                <div style={{ fontSize: 12, opacity: 0.75, fontFamily: T.mono }}>
+                  {saveState === "saving" && "Saving…"}
+                  {saveState === "saved" && "✓ All changes saved"}
+                  {saveState === "error" && "⚠ Save failed — retry by editing"}
+                </div>
+              </div>
+            </div>
+          </div>
+          {/* Tabs */}
+          <div style={{ display: "flex", gap: 4, marginTop: 16, overflowX: "auto" }}>
+            {tabs.map(({ id, label, icon }) => (
+              <button
+                key={id}
+                onClick={() => setTab(id)}
+                style={{
+                  display: "flex", alignItems: "center", gap: 6, padding: "10px 14px",
+                  border: "none", cursor: "pointer", fontSize: 13.5, fontWeight: 600,
+                  borderRadius: "8px 8px 0 0", whiteSpace: "nowrap",
+                  background: tab === id ? T.paper : "rgba(255,255,255,0.06)",
+                  color: tab === id ? wsMeta.accent : "rgba(255,255,255,0.85)",
+                }}
+              >
+                <Icon name={icon} size={15} /> {label}
+              </button>
+            ))}
+          </div>
+        </div>
+      </div>
+
+      <div style={{ maxWidth: 980, margin: "0 auto", padding: "20px 16px 60px" }}>
+        {tab === "dashboard" && (
+          <Dashboard
+            month={month} setMonth={setMonth} monthOptions={monthOptions}
+            monthTotal={monthTotal} budgetTotal={budgetTotal} byCategory={byCategory}
+            byCard={byCard} netWorth={netWorth} goals={data.goals} txCount={monthTx.length}
+            budgets={data.budgets}
+          />
+        )}
+        {tab === "expenses" && (
+          <Expenses
+            data={data} update={update} month={month} setMonth={setMonth}
+            monthOptions={monthOptions} monthTx={monthTx} monthTotal={monthTotal}
+          />
+        )}
+        {tab === "budget" && (
+          <Budget data={data} update={update} month={month} setMonth={setMonth}
+            monthOptions={monthOptions} byCategory={byCategory} />
+        )}
+        {tab === "goals" && <Goals data={data} update={update} />}
+        {tab === "pool" && <Pool data={data} update={update} />}
+        {tab === "networth" && (
+          <NetWorth data={data} update={update} assetsTotal={assetsTotal}
+            liabTotal={liabTotal} netWorth={netWorth} />
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ---------- Month selector ----------
+const MonthPicker = ({ month, setMonth, monthOptions }) => (
+  <select
+    value={month}
+    onChange={(e) => setMonth(e.target.value)}
+    style={{ ...inputStyle, width: "auto", fontWeight: 600, fontFamily: T.mono }}
+  >
+    {monthOptions.map((m) => (
+      <option key={m} value={m}>{monthLabel(m)}</option>
+    ))}
+  </select>
+);
+
+// ---------- Dashboard ----------
+function Dashboard({ month, setMonth, monthOptions, monthTotal, budgetTotal, byCategory, byCard, netWorth, goals, txCount, budgets }) {
+  const overBudget = budgetTotal > 0 && monthTotal > budgetTotal;
+  const pct = budgetTotal > 0 ? (monthTotal / budgetTotal) * 100 : 0;
+  const topCats = Object.entries(byCategory).sort((a, b) => b[1] - a[1]).slice(0, 5);
+  const maxCat = topCats.length ? topCats[0][1] : 1;
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 8 }}>
+        <Eyebrow>Overview — {monthLabel(month)}</Eyebrow>
+        <MonthPicker month={month} setMonth={setMonth} monthOptions={monthOptions} />
+      </div>
+
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(210px, 1fr))", gap: 12 }}>
+        <Card>
+          <Eyebrow>Spent this month</Eyebrow>
+          <MonoNum size={26} color={overBudget ? T.red : T.ink}>{fmtRM(monthTotal)}</MonoNum>
+          <div style={{ fontSize: 12.5, color: T.muted, marginTop: 4 }}>{txCount} transactions</div>
+        </Card>
+        <Card>
+          <Eyebrow>Monthly budget</Eyebrow>
+          <MonoNum size={26}>{budgetTotal > 0 ? fmtRM(budgetTotal) : "—"}</MonoNum>
+          {budgetTotal > 0 ? (
+            <div style={{ marginTop: 8 }}>
+              <Bar pct={pct} over={overBudget} />
+              <div style={{ fontSize: 12.5, color: overBudget ? T.red : T.muted, marginTop: 4, fontWeight: 600 }}>
+                {overBudget
+                  ? `Over by ${fmtRM(monthTotal - budgetTotal)}`
+                  : `${fmtRM(budgetTotal - monthTotal)} remaining`}
+              </div>
+            </div>
+          ) : (
+            <div style={{ fontSize: 12.5, color: T.muted, marginTop: 4 }}>Set budgets in the Budget tab</div>
+          )}
+        </Card>
+        <Card>
+          <Eyebrow>Family net worth</Eyebrow>
+          <MonoNum size={26} color={netWorth < 0 ? T.red : T.pineMid}>{fmtRM(netWorth)}</MonoNum>
+          <div style={{ fontSize: 12.5, color: T.muted, marginTop: 4, display: "flex", alignItems: "center", gap: 4 }}>
+            {netWorth >= 0 ? <Icon name="trending-up" size={13} /> : <Icon name="trending-down" size={13} />} assets minus liabilities
+          </div>
+        </Card>
+      </div>
+
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))", gap: 12 }}>
+        <Card>
+          <Eyebrow>Top spending categories</Eyebrow>
+          {topCats.length === 0 && <div style={{ color: T.muted, fontSize: 13.5, padding: "12px 0" }}>No transactions yet this month. Add some in the Expenses tab.</div>}
+          {topCats.map(([cat, amt]) => {
+            const b = Number(budgets[cat]) || 0;
+            const over = b > 0 && amt > b;
+            return (
+              <div key={cat} style={{ marginBottom: 12 }}>
+                <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13, marginBottom: 4 }}>
+                  <span style={{ fontWeight: 600 }}>{cat}</span>
+                  <span style={{ fontFamily: T.mono, color: over ? T.red : T.ink, fontVariantNumeric: "tabular-nums" }}>
+                    {fmtRM(amt)}{b > 0 && <span style={{ color: T.muted }}> / {fmtRM(b)}</span>}
+                  </span>
+                </div>
+                <Bar pct={b > 0 ? (amt / b) * 100 : (amt / maxCat) * 100} over={over} />
+              </div>
+            );
+          })}
+        </Card>
+
+        <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+          <Card>
+            <Eyebrow>Spend by card / method</Eyebrow>
+            {Object.keys(byCard).length === 0 && <div style={{ color: T.muted, fontSize: 13.5, padding: "8px 0" }}>Nothing charged yet this month.</div>}
+            {Object.entries(byCard).sort((a, b) => b[1] - a[1]).map(([card, amt]) => (
+              <div key={card} style={{ display: "flex", justifyContent: "space-between", padding: "7px 0", borderBottom: `1px solid ${T.line}`, fontSize: 13.5 }}>
+                <span style={{ display: "flex", alignItems: "center", gap: 6 }}><Icon name="credit-card" size={14} color={T.muted} /> {card}</span>
+                <span style={{ fontFamily: T.mono, fontWeight: 600, fontVariantNumeric: "tabular-nums" }}>{fmtRM(amt)}</span>
+              </div>
+            ))}
+          </Card>
+          <Card>
+            <Eyebrow>Savings goals</Eyebrow>
+            {goals.length === 0 && <div style={{ color: T.muted, fontSize: 13.5, padding: "8px 0" }}>No goals yet — create one in the Goals tab.</div>}
+            {goals.slice(0, 3).map((g) => (
+              <div key={g.id} style={{ marginBottom: 10 }}>
+                <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13, marginBottom: 4 }}>
+                  <span style={{ fontWeight: 600, display: "flex", alignItems: "center", gap: 5 }}><Icon name="piggy-bank" size={14} color={T.amber} />{g.name}</span>
+                  <span style={{ fontFamily: T.mono, fontVariantNumeric: "tabular-nums" }}>{Math.round((g.saved / g.target) * 100)}%</span>
+                </div>
+                <Bar pct={(g.saved / g.target) * 100} />
+              </div>
+            ))}
+          </Card>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ---------- Expenses ----------
+function Expenses({ data, update, month, setMonth, monthOptions, monthTx, monthTotal }) {
+  const [form, setForm] = useState({ date: todayStr(), desc: "", amount: "", category: data.categories[0], method: data.cards[0] });
+  const [showImport, setShowImport] = useState(false);
+  const [importText, setImportText] = useState("");
+  const [importCat, setImportCat] = useState(data.categories[0]);
+  const [importCard, setImportCard] = useState(data.cards[0]);
+  const [parsed, setParsed] = useState(null);
+  const [newCard, setNewCard] = useState("");
+  const [filterCat, setFilterCat] = useState("All");
+
+  const addTx = () => {
+    const amt = parseAmount(form.amount);
+    if (!form.desc.trim() || !amt || !parseDate(form.date)) return;
+    update((d) => {
+      d.transactions.push({ id: uid(), date: form.date, desc: form.desc.trim(), amount: amt, category: form.category, method: form.method });
+      d.transactions.sort((a, b) => b.date.localeCompare(a.date));
+      return d;
+    });
+    setForm((f) => ({ ...f, desc: "", amount: "" }));
+  };
+
+  const runParse = () => {
+    const lines = importText.split("\n").map((l) => l.trim()).filter(Boolean);
+    const ok = []; const bad = [];
+    lines.forEach((line) => {
+      const parts = line.includes("\t") ? line.split("\t") : line.split(",");
+      const cells = parts.map((p) => p.trim()).filter((p) => p !== "");
+      if (cells.length < 3) { bad.push(line); return; }
+      const date = parseDate(cells[0]);
+      // amount = last cell that parses as a number; category may follow
+      let amtIdx = -1;
+      for (let i = cells.length - 1; i >= 1; i--) {
+        if (parseAmount(cells[i]) !== null && /\d/.test(cells[i])) { amtIdx = i; break; }
+      }
+      const amount = amtIdx > 0 ? parseAmount(cells[amtIdx]) : null;
+      if (!date || !amount) { bad.push(line); return; }
+      const desc = cells.slice(1, amtIdx).join(", ") || "Card transaction";
+      const catRaw = cells[amtIdx + 1];
+      const category = catRaw && data.categories.find((c) => c.toLowerCase() === catRaw.toLowerCase());
+      ok.push({ date, desc, amount, category: category || importCat });
+    });
+    setParsed({ ok, bad });
+  };
+
+  const confirmImport = () => {
+    update((d) => {
+      parsed.ok.forEach((t) => d.transactions.push({ id: uid(), ...t, method: importCard }));
+      d.transactions.sort((a, b) => b.date.localeCompare(a.date));
+      return d;
+    });
+    setParsed(null); setImportText(""); setShowImport(false);
+  };
+
+  const shown = filterCat === "All" ? monthTx : monthTx.filter((t) => t.category === filterCat);
+  // running balance for passbook feel (chronological)
+  const chrono = [...shown].sort((a, b) => a.date.localeCompare(b.date) || a.id.localeCompare(b.id));
+  let run = 0;
+  const withRun = chrono.map((t) => { run += t.amount; return { ...t, run }; }).reverse();
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+      {/* Add form */}
+      <Card>
+        <Eyebrow>Add a transaction</Eyebrow>
+        <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "flex-end" }}>
+          <Field label="Date"><input type="date" value={form.date} onChange={(e) => setForm({ ...form, date: e.target.value })} style={inputStyle} /></Field>
+          <Field label="Description"><input value={form.desc} placeholder="e.g. Jaya Grocer weekly run" onChange={(e) => setForm({ ...form, desc: e.target.value })} style={inputStyle} onKeyDown={(e) => e.key === "Enter" && addTx()} /></Field>
+          <Field label="Amount (RM)"><input value={form.amount} placeholder="0.00" inputMode="decimal" onChange={(e) => setForm({ ...form, amount: e.target.value })} style={{ ...inputStyle, fontFamily: T.mono }} onKeyDown={(e) => e.key === "Enter" && addTx()} /></Field>
+          <Field label="Category">
+            <select value={form.category} onChange={(e) => setForm({ ...form, category: e.target.value })} style={inputStyle}>
+              {data.categories.map((c) => <option key={c}>{c}</option>)}
+            </select>
+          </Field>
+          <Field label="Card / method">
+            <select value={form.method} onChange={(e) => setForm({ ...form, method: e.target.value })} style={inputStyle}>
+              {data.cards.map((c) => <option key={c}>{c}</option>)}
+            </select>
+          </Field>
+          <Btn onClick={addTx}><Icon name="plus" size={15} /> Add</Btn>
+        </div>
+        <div style={{ display: "flex", gap: 8, marginTop: 12, alignItems: "center", flexWrap: "wrap" }}>
+          <Btn kind="ghost" small onClick={() => setShowImport(!showImport)}><Icon name="upload" size={13} /> Bulk import from statement</Btn>
+          <input value={newCard} placeholder="Add a card (e.g. Maybank Visa)" onChange={(e) => setNewCard(e.target.value)} style={{ ...inputStyle, width: 220 }} />
+          <Btn kind="ghost" small disabled={!newCard.trim()} onClick={() => { update((d) => { if (!d.cards.includes(newCard.trim())) d.cards.push(newCard.trim()); return d; }); setNewCard(""); }}>Save card</Btn>
+        </div>
+      </Card>
+
+      {/* Bulk import */}
+      {showImport && (
+        <Card style={{ borderColor: T.amber, background: T.amberSoft }}>
+          <div style={{ display: "flex", justifyContent: "space-between" }}>
+            <Eyebrow>Bulk import — paste from your card statement</Eyebrow>
+            <button onClick={() => { setShowImport(false); setParsed(null); }} style={{ background: "none", border: "none", cursor: "pointer" }}><Icon name="x" size={16} color={T.muted} /></button>
+          </div>
+          <div style={{ fontSize: 12.5, color: T.muted, marginBottom: 8 }}>
+            One transaction per line: <b>date, description, amount</b> (category optional at the end). Commas or tabs both work.
+            Example: <span style={{ fontFamily: T.mono }}>15/06/2026, Village Grocer, 245.50, Groceries</span>
+          </div>
+          <textarea
+            value={importText}
+            onChange={(e) => { setImportText(e.target.value); setParsed(null); }}
+            rows={6}
+            placeholder={"15/06/2026, Village Grocer, 245.50\n16/06/2026, Petronas Setia Alam, 120.00, Transport & Fuel"}
+            style={{ ...inputStyle, fontFamily: T.mono, fontSize: 12.5, resize: "vertical" }}
+          />
+          <div style={{ display: "flex", gap: 10, marginTop: 10, flexWrap: "wrap", alignItems: "flex-end" }}>
+            <Field label="Default category (when not stated)">
+              <select value={importCat} onChange={(e) => setImportCat(e.target.value)} style={inputStyle}>
+                {data.categories.map((c) => <option key={c}>{c}</option>)}
+              </select>
+            </Field>
+            <Field label="Card these came from">
+              <select value={importCard} onChange={(e) => setImportCard(e.target.value)} style={inputStyle}>
+                {data.cards.map((c) => <option key={c}>{c}</option>)}
+              </select>
+            </Field>
+            <Btn kind="ghost" onClick={runParse} disabled={!importText.trim()}>Preview</Btn>
+            {parsed && parsed.ok.length > 0 && (
+              <Btn onClick={confirmImport}><Icon name="check" size={15} /> Import {parsed.ok.length} transactions</Btn>
+            )}
+          </div>
+          {parsed && (
+            <div style={{ marginTop: 10, fontSize: 13 }}>
+              <div style={{ fontWeight: 600, color: T.pine }}>{parsed.ok.length} lines ready · {parsed.bad.length} skipped</div>
+              {parsed.ok.slice(0, 5).map((t, i) => (
+                <div key={i} style={{ fontFamily: T.mono, fontSize: 12, color: T.ink, padding: "2px 0" }}>
+                  {t.date} · {t.desc} · {fmtRM(t.amount)} · {t.category}
+                </div>
+              ))}
+              {parsed.ok.length > 5 && <div style={{ color: T.muted, fontSize: 12 }}>…and {parsed.ok.length - 5} more</div>}
+              {parsed.bad.length > 0 && <div style={{ color: T.red, fontSize: 12, marginTop: 4 }}>Skipped (couldn't read date/amount): {parsed.bad.slice(0, 3).join(" | ")}</div>}
+            </div>
+          )}
+        </Card>
+      )}
+
+      {/* Ledger */}
+      <Card style={{ padding: 0, overflow: "hidden" }}>
+        <div style={{ padding: "14px 16px", display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 8, borderBottom: `2px solid ${T.pine}` }}>
+          <div>
+            <Eyebrow>Ledger — {monthLabel(month)}</Eyebrow>
+            <MonoNum size={20}>{fmtRM(monthTotal)}</MonoNum>
+          </div>
+          <div style={{ display: "flex", gap: 8 }}>
+            <select value={filterCat} onChange={(e) => setFilterCat(e.target.value)} style={{ ...inputStyle, width: "auto" }}>
+              <option>All</option>
+              {data.categories.map((c) => <option key={c}>{c}</option>)}
+            </select>
+            <MonthPicker month={month} setMonth={setMonth} monthOptions={monthOptions} />
+          </div>
+        </div>
+        {withRun.length === 0 ? (
+          <div style={{ padding: 28, textAlign: "center", color: T.muted, fontSize: 13.5 }}>
+            No transactions in {monthLabel(month)}{filterCat !== "All" ? ` for ${filterCat}` : ""}. Add one above or bulk import a statement.
+          </div>
+        ) : (
+          <div style={{ overflowX: "auto" }}>
+            <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
+              <thead>
+                <tr style={{ color: T.muted, fontSize: 11, textTransform: "uppercase", letterSpacing: "0.06em" }}>
+                  <th style={{ textAlign: "left", padding: "8px 16px" }}>Date</th>
+                  <th style={{ textAlign: "left", padding: "8px 8px" }}>Description</th>
+                  <th style={{ textAlign: "left", padding: "8px 8px" }}>Category</th>
+                  <th style={{ textAlign: "left", padding: "8px 8px" }}>Card</th>
+                  <th style={{ textAlign: "right", padding: "8px 8px" }}>Amount</th>
+                  <th style={{ textAlign: "right", padding: "8px 8px" }}>Running</th>
+                  <th style={{ width: 40 }}></th>
+                </tr>
+              </thead>
+              <tbody>
+                {withRun.map((t) => (
+                  <tr key={t.id} style={{ borderTop: `1px solid ${T.line}` }}>
+                    <td style={{ padding: "9px 16px", fontFamily: T.mono, fontSize: 12, whiteSpace: "nowrap" }}>{t.date}</td>
+                    <td style={{ padding: "9px 8px", fontWeight: 500 }}>{t.desc}</td>
+                    <td style={{ padding: "9px 8px" }}>
+                      <span style={{ background: T.pineSoft, color: T.pineMid, borderRadius: 99, padding: "2px 9px", fontSize: 11.5, fontWeight: 600, whiteSpace: "nowrap" }}>{t.category}</span>
+                    </td>
+                    <td style={{ padding: "9px 8px", color: T.muted, fontSize: 12, whiteSpace: "nowrap" }}>{t.method}</td>
+                    <td style={{ padding: "9px 8px", textAlign: "right", fontFamily: T.mono, fontWeight: 600, fontVariantNumeric: "tabular-nums", whiteSpace: "nowrap" }}>{fmtRM(t.amount)}</td>
+                    <td style={{ padding: "9px 8px", textAlign: "right", fontFamily: T.mono, color: T.muted, fontVariantNumeric: "tabular-nums", whiteSpace: "nowrap" }}>{fmtRM(t.run)}</td>
+                    <td style={{ padding: "9px 8px", textAlign: "right" }}>
+                      <button onClick={() => update((d) => { d.transactions = d.transactions.filter((x) => x.id !== t.id); return d; })} style={{ background: "none", border: "none", cursor: "pointer" }} title="Delete">
+                        <Icon name="trash2" size={14} color={T.muted} />
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </Card>
+    </div>
+  );
+}
+
+// ---------- Budget ----------
+function Budget({ data, update, month, setMonth, monthOptions, byCategory }) {
+  const [newCat, setNewCat] = useState("");
+  const totalBudget = Object.values(data.budgets).reduce((s, v) => s + (Number(v) || 0), 0);
+  const totalSpent = Object.values(byCategory).reduce((s, v) => s + v, 0);
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 8 }}>
+        <Eyebrow>Monthly budget vs actual — {monthLabel(month)}</Eyebrow>
+        <MonthPicker month={month} setMonth={setMonth} monthOptions={monthOptions} />
+      </div>
+      <Card>
+        <div style={{ display: "flex", gap: 24, flexWrap: "wrap", marginBottom: 16 }}>
+          <div><Eyebrow>Total budget</Eyebrow><MonoNum>{fmtRM(totalBudget)}</MonoNum></div>
+          <div><Eyebrow>Total spent</Eyebrow><MonoNum color={totalSpent > totalBudget && totalBudget > 0 ? T.red : T.ink}>{fmtRM(totalSpent)}</MonoNum></div>
+          <div><Eyebrow>Position</Eyebrow><MonoNum color={totalBudget - totalSpent < 0 ? T.red : T.pineMid}>{fmtRM(totalBudget - totalSpent)}</MonoNum></div>
+        </div>
+        {data.categories.map((cat) => {
+          const b = Number(data.budgets[cat]) || 0;
+          const spent = byCategory[cat] || 0;
+          const over = b > 0 && spent > b;
+          return (
+            <div key={cat} style={{ display: "flex", alignItems: "center", gap: 12, padding: "10px 0", borderTop: `1px solid ${T.line}`, flexWrap: "wrap" }}>
+              <div style={{ width: 160, fontWeight: 600, fontSize: 13.5 }}>{cat}</div>
+              <input
+                value={data.budgets[cat] ?? ""}
+                placeholder="Budget"
+                inputMode="decimal"
+                onChange={(e) => update((d) => { d.budgets[cat] = e.target.value; return d; })}
+                style={{ ...inputStyle, width: 110, fontFamily: T.mono, textAlign: "right" }}
+              />
+              <div style={{ flex: 1, minWidth: 140 }}>
+                <Bar pct={b > 0 ? (spent / b) * 100 : 0} over={over} />
+              </div>
+              <div style={{ fontFamily: T.mono, fontSize: 12.5, width: 170, textAlign: "right", color: over ? T.red : T.muted, fontVariantNumeric: "tabular-nums" }}>
+                {fmtRM(spent)}{b > 0 && ` / ${fmtRM(b)}`}
+              </div>
+            </div>
+          );
+        })}
+        <div style={{ display: "flex", gap: 8, marginTop: 14 }}>
+          <input value={newCat} placeholder="Add a category" onChange={(e) => setNewCat(e.target.value)} style={{ ...inputStyle, width: 220 }} />
+          <Btn kind="ghost" small disabled={!newCat.trim()} onClick={() => { update((d) => { if (!d.categories.includes(newCat.trim())) d.categories.push(newCat.trim()); return d; }); setNewCat(""); }}><Icon name="plus" size={13} /> Add</Btn>
+        </div>
+      </Card>
+    </div>
+  );
+}
+
+// ---------- Goals ----------
+function Goals({ data, update }) {
+  const [form, setForm] = useState({ name: "", target: "", saved: "", targetDate: "" });
+  const [contrib, setContrib] = useState({});
+
+  const addGoal = () => {
+    const target = parseAmount(form.target);
+    if (!form.name.trim() || !target) return;
+    update((d) => {
+      d.goals.push({ id: uid(), name: form.name.trim(), target, saved: parseAmount(form.saved) || 0, targetDate: form.targetDate || null });
+      return d;
+    });
+    setForm({ name: "", target: "", saved: "", targetDate: "" });
+  };
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+      <Card>
+        <Eyebrow>Create a savings goal</Eyebrow>
+        <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "flex-end" }}>
+          <Field label="Goal name"><input value={form.name} placeholder="e.g. Family holiday, Education fund" onChange={(e) => setForm({ ...form, name: e.target.value })} style={inputStyle} /></Field>
+          <Field label="Target (RM)"><input value={form.target} inputMode="decimal" placeholder="10000" onChange={(e) => setForm({ ...form, target: e.target.value })} style={{ ...inputStyle, fontFamily: T.mono }} /></Field>
+          <Field label="Saved so far (RM)"><input value={form.saved} inputMode="decimal" placeholder="0" onChange={(e) => setForm({ ...form, saved: e.target.value })} style={{ ...inputStyle, fontFamily: T.mono }} /></Field>
+          <Field label="Target date"><input type="date" value={form.targetDate} onChange={(e) => setForm({ ...form, targetDate: e.target.value })} style={inputStyle} /></Field>
+          <Btn onClick={addGoal}><Icon name="plus" size={15} /> Add goal</Btn>
+        </div>
+      </Card>
+
+      {data.goals.length === 0 && (
+        <Card><div style={{ color: T.muted, fontSize: 13.5 }}>No goals yet. Common ones for a family: emergency fund (3–6 months of expenses), children's education, holiday, home upgrade.</div></Card>
+      )}
+
+      {data.goals.map((g) => {
+        const pct = Math.min((g.saved / g.target) * 100, 100);
+        const monthsLeft = g.targetDate ? Math.max(0, Math.round((new Date(g.targetDate) - new Date()) / (30.44 * 24 * 3600 * 1000))) : null;
+        const needed = monthsLeft && monthsLeft > 0 ? (g.target - g.saved) / monthsLeft : null;
+        return (
+          <Card key={g.id}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 8, flexWrap: "wrap" }}>
+              <div>
+                <div style={{ fontWeight: 700, fontSize: 15, display: "flex", alignItems: "center", gap: 6 }}>
+                  <Icon name="piggy-bank" size={16} color={T.amber} /> {g.name}
+                </div>
+                <div style={{ fontFamily: T.mono, fontSize: 13, color: T.muted, marginTop: 4, fontVariantNumeric: "tabular-nums" }}>
+                  {fmtRM(g.saved)} of {fmtRM(g.target)} · {Math.round(pct)}%
+                  {g.targetDate && ` · by ${g.targetDate}`}
+                </div>
+                {needed !== null && g.saved < g.target && (
+                  <div style={{ fontSize: 12.5, color: T.amber, fontWeight: 600, marginTop: 2 }}>
+                    Needs ~{fmtRM(needed)}/month to hit the date
+                  </div>
+                )}
+              </div>
+              <button onClick={() => update((d) => { d.goals = d.goals.filter((x) => x.id !== g.id); return d; })} style={{ background: "none", border: "none", cursor: "pointer" }}><Icon name="trash2" size={15} color={T.muted} /></button>
+            </div>
+            <div style={{ margin: "12px 0" }}><Bar pct={pct} /></div>
+            <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+              <input
+                value={contrib[g.id] || ""}
+                placeholder="Add contribution (RM)"
+                inputMode="decimal"
+                onChange={(e) => setContrib({ ...contrib, [g.id]: e.target.value })}
+                style={{ ...inputStyle, width: 190, fontFamily: T.mono }}
+              />
+              <Btn small kind="ghost" disabled={!parseAmount(contrib[g.id])} onClick={() => {
+                const amt = parseAmount(contrib[g.id]);
+                update((d) => { const gg = d.goals.find((x) => x.id === g.id); if (gg) gg.saved += amt; return d; });
+                setContrib({ ...contrib, [g.id]: "" });
+              }}><Icon name="plus" size={13} /> Contribute</Btn>
+            </div>
+          </Card>
+        );
+      })}
+    </div>
+  );
+}
+
+// ---------- Loans ----------
+function LoansSection({ data, update }) {
+  const loans = data.loans || [];
+  const [form, setForm] = useState({ name: "", balance: "", installment: "", rate: "", original: "" });
+  const [payAmt, setPayAmt] = useState({});
+  const [openHistory, setOpenHistory] = useState({});
+  const curMonth = thisMonth();
+
+  const addLoan = () => {
+    const balance = parseAmount(form.balance);
+    const installment = parseAmount(form.installment);
+    if (!form.name.trim() || balance === null) return;
+    update((d) => {
+      d.loans = d.loans || [];
+      d.loans.push({
+        id: uid(),
+        name: form.name.trim(),
+        balance,
+        original: parseAmount(form.original) || balance,
+        installment: installment || 0,
+        rate: parseFloat(form.rate) || 0,
+        payments: [],
+      });
+      return d;
+    });
+    setForm({ name: "", balance: "", installment: "", rate: "", original: "" });
+  };
+
+  const recordPayment = (loan, amount) => {
+    const amt = parseAmount(amount);
+    if (!amt) return;
+    update((d) => {
+      const l = d.loans.find((x) => x.id === loan.id);
+      if (!l) return d;
+      const interest = l.rate > 0 ? Math.min((l.balance * (l.rate / 100)) / 12, amt) : 0;
+      const principal = Math.min(amt - interest, l.balance);
+      l.balance = Math.max(0, l.balance - principal);
+      l.payments.push({
+        id: uid(), date: todayStr(), month: curMonth,
+        amount: amt, interest, principal,
+        balanceAfter: l.balance,
+      });
+      return d;
+    });
+    setPayAmt((p) => ({ ...p, [loan.id]: "" }));
+  };
+
+  return (
+    <Card>
+      <Eyebrow>Loans — balances carry forward automatically</Eyebrow>
+      {loans.length === 0 && (
+        <div style={{ color: T.muted, fontSize: 13, margin: "6px 0 10px" }}>
+          Add each loan once with its current outstanding balance. Every month, record the installment
+          and the balance reduces and carries forward — no retyping. Add the interest rate (% p.a.) and
+          each payment is split into interest vs principal so you see real progress.
+        </div>
+      )}
+
+      {loans.map((loan) => {
+        const paidPct = loan.original > 0 ? ((loan.original - loan.balance) / loan.original) * 100 : 0;
+        const paidThisMonth = loan.payments.some((p) => p.month === curMonth);
+        const monthlyInterest = loan.rate > 0 ? (loan.balance * (loan.rate / 100)) / 12 : 0;
+        const recent = [...loan.payments].reverse().slice(0, 6);
+        const done = loan.balance <= 0;
+        return (
+          <div key={loan.id} style={{ borderTop: `1px solid ${T.line}`, padding: "14px 0" }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 8, flexWrap: "wrap" }}>
+              <div>
+                <div style={{ fontWeight: 700, fontSize: 14.5 }}>
+                  {loan.name}
+                  {done && <span style={{ marginLeft: 8, background: T.pineSoft, color: T.pineMid, borderRadius: 99, padding: "2px 9px", fontSize: 11, fontWeight: 700 }}>SETTLED 🎉</span>}
+                  {!done && paidThisMonth && <span style={{ marginLeft: 8, background: T.pineSoft, color: T.pineMid, borderRadius: 99, padding: "2px 9px", fontSize: 11, fontWeight: 700 }}>Paid for {monthLabel(curMonth)}</span>}
+                </div>
+                <div style={{ fontFamily: T.mono, fontSize: 12.5, color: T.muted, marginTop: 3, fontVariantNumeric: "tabular-nums" }}>
+                  {loan.installment > 0 && <>installment {fmtRM(loan.installment)}/mo · </>}
+                  {loan.rate > 0 && <>{loan.rate}% p.a. (~{fmtRM(monthlyInterest)} interest this month) · </>}
+                  {loan.original > loan.balance && <>{fmtRM(loan.original - loan.balance)} paid down</>}
+                </div>
+              </div>
+              <div style={{ textAlign: "right" }}>
+                <Eyebrow>Outstanding</Eyebrow>
+                <MonoNum size={20} color={done ? T.pineMid : T.red}>{fmtRM(loan.balance)}</MonoNum>
+              </div>
+            </div>
+
+            <div style={{ margin: "10px 0" }}><Bar pct={paidPct} /></div>
+
+            {!done && (
+              <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+                <input
+                  value={payAmt[loan.id] ?? (loan.installment || "")}
+                  inputMode="decimal"
+                  onChange={(e) => setPayAmt({ ...payAmt, [loan.id]: e.target.value })}
+                  style={{ ...inputStyle, width: 130, fontFamily: T.mono }}
+                  placeholder="Amount (RM)"
+                />
+                <Btn small onClick={() => recordPayment(loan, payAmt[loan.id] ?? loan.installment)}>
+                  <Icon name="check" size={13} /> Record payment
+                </Btn>
+                {loan.payments.length > 0 && (
+                  <Btn small kind="ghost" onClick={() => setOpenHistory((h) => ({ ...h, [loan.id]: !h[loan.id] }))}>
+                    {openHistory[loan.id] ? "Hide" : "Show"} history ({loan.payments.length})
+                  </Btn>
+                )}
+                <button onClick={() => update((d) => { d.loans = d.loans.filter((x) => x.id !== loan.id); return d; })} style={{ background: "none", border: "none", cursor: "pointer", marginLeft: "auto" }} title="Delete loan">
+                  <Icon name="trash2" size={14} color={T.muted} />
+                </button>
+              </div>
+            )}
+
+            {openHistory[loan.id] && recent.length > 0 && (
+              <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12, marginTop: 10, fontFamily: T.mono, fontVariantNumeric: "tabular-nums" }}>
+                <thead>
+                  <tr style={{ color: T.muted, fontSize: 10.5, textTransform: "uppercase", letterSpacing: "0.06em", fontFamily: "system-ui, sans-serif" }}>
+                    <th style={{ textAlign: "left", padding: "4px 0" }}>Date</th>
+                    <th style={{ textAlign: "right" }}>Paid</th>
+                    <th style={{ textAlign: "right" }}>Interest</th>
+                    <th style={{ textAlign: "right" }}>Principal</th>
+                    <th style={{ textAlign: "right" }}>Balance after</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {recent.map((p) => (
+                    <tr key={p.id} style={{ borderTop: `1px solid ${T.line}` }}>
+                      <td style={{ padding: "5px 0" }}>{p.date}</td>
+                      <td style={{ textAlign: "right" }}>{fmtRM(p.amount)}</td>
+                      <td style={{ textAlign: "right", color: T.red }}>{p.interest ? fmtRM(p.interest) : "—"}</td>
+                      <td style={{ textAlign: "right", color: T.pineMid }}>{fmtRM(p.principal)}</td>
+                      <td style={{ textAlign: "right", fontWeight: 700 }}>{fmtRM(p.balanceAfter)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+          </div>
+        );
+      })}
+
+      <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 14, alignItems: "flex-end", borderTop: loans.length ? `1px solid ${T.line}` : "none", paddingTop: loans.length ? 14 : 0 }}>
+        <Field label="Loan name"><input value={form.name} placeholder="e.g. Car loan, personal loan" onChange={(e) => setForm({ ...form, name: e.target.value })} style={inputStyle} /></Field>
+        <Field label="Outstanding now (RM)"><input value={form.balance} inputMode="decimal" onChange={(e) => setForm({ ...form, balance: e.target.value })} style={{ ...inputStyle, fontFamily: T.mono }} /></Field>
+        <Field label="Monthly installment (RM)"><input value={form.installment} inputMode="decimal" onChange={(e) => setForm({ ...form, installment: e.target.value })} style={{ ...inputStyle, fontFamily: T.mono }} /></Field>
+        <Field label="Interest % p.a. (optional)"><input value={form.rate} inputMode="decimal" placeholder="e.g. 3.5" onChange={(e) => setForm({ ...form, rate: e.target.value })} style={{ ...inputStyle, fontFamily: T.mono }} /></Field>
+        <Field label="Original amount (optional)"><input value={form.original} inputMode="decimal" onChange={(e) => setForm({ ...form, original: e.target.value })} style={{ ...inputStyle, fontFamily: T.mono }} /></Field>
+        <Btn small onClick={addLoan}><Icon name="plus" size={13} /> Add loan</Btn>
+      </div>
+    </Card>
+  );
+}
+
+// ---------- Pool Account ----------
+function Pool({ data, update }) {
+  const pool = data.pool || { topup: 0, startMonth: thisMonthConst(), entries: [] };
+  const [spend, setSpend] = useState({ date: todayStr(), desc: "", amount: "" });
+  const [editTopup, setEditTopup] = useState(false);
+  const [topupDraft, setTopupDraft] = useState(String(pool.topup || ""));
+  const [startDraft, setStartDraft] = useState(pool.startMonth || thisMonthConst());
+
+  // Build the full ledger: auto top-ups per month + manual entries, chronological, with running balance
+  const ledger = useMemo(() => {
+    const rows = [];
+    const topup = Number(pool.topup) || 0;
+    // auto monthly top-ups from startMonth to current month
+    if (topup > 0 && pool.startMonth) {
+      let [y, m] = pool.startMonth.split("-").map(Number);
+      const [cy, cm] = thisMonthConst().split("-").map(Number);
+      // guard against runaway loops
+      let guard = 0;
+      while ((y < cy || (y === cy && m <= cm)) && guard < 600) {
+        const ym = `${y}-${String(m).padStart(2, "0")}`;
+        // skip a top-up if user deleted it for that month
+        if (!(pool.skipTopups || []).includes(ym)) {
+          rows.push({ id: `topup-${ym}`, date: `${ym}-01`, type: "topup", desc: "Monthly top-up", amount: topup, auto: true, ym });
+        }
+        m++; if (m > 12) { m = 1; y++; }
+        guard++;
+      }
+    }
+    (pool.entries || []).forEach((e) => rows.push(e));
+    rows.sort((a, b) => (a.date + a.id).localeCompare(b.date + b.id));
+    let run = 0;
+    return rows.map((r) => {
+      run += r.type === "topup" || r.type === "adjust-in" ? r.amount : -r.amount;
+      return { ...r, run };
+    });
+  }, [pool]);
+
+  const balance = ledger.length ? ledger[ledger.length - 1].run : 0;
+  const totalIn = ledger.filter((r) => r.type === "topup" || r.type === "adjust-in").reduce((s, r) => s + r.amount, 0);
+  const totalOut = ledger.filter((r) => r.type === "spend").reduce((s, r) => s + r.amount, 0);
+  const thisMonthSpend = ledger.filter((r) => r.type === "spend" && r.date.startsWith(thisMonthConst())).reduce((s, r) => s + r.amount, 0);
+
+  const addSpend = () => {
+    const amt = parseAmount(spend.amount);
+    if (!amt || !spend.desc.trim() || !parseDate(spend.date)) return;
+    update((d) => {
+      d.pool = d.pool || { topup: 0, startMonth: thisMonthConst(), entries: [] };
+      d.pool.entries = d.pool.entries || [];
+      d.pool.entries.push({ id: uid(), date: spend.date, type: "spend", desc: spend.desc.trim(), amount: amt });
+      return d;
+    });
+    setSpend((s) => ({ ...s, desc: "", amount: "" }));
+  };
+
+  const saveSettings = () => {
+    update((d) => {
+      d.pool = d.pool || { entries: [] };
+      d.pool.topup = parseAmount(topupDraft) || 0;
+      d.pool.startMonth = startDraft;
+      return d;
+    });
+    setEditTopup(false);
+  };
+
+  const removeRow = (row) => {
+    update((d) => {
+      if (row.auto) {
+        d.pool.skipTopups = [...(d.pool.skipTopups || []), row.ym];
+      } else {
+        d.pool.entries = (d.pool.entries || []).filter((e) => e.id !== row.id);
+      }
+      return d;
+    });
+  };
+
+  const view = [...ledger].reverse();
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+      {/* Summary */}
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", gap: 12 }}>
+        <Card style={{ borderColor: T.pine, borderWidth: 2 }}>
+          <Eyebrow>Pool balance now</Eyebrow>
+          <MonoNum size={26} color={balance < 0 ? T.red : T.pineMid}>{fmtRM(balance)}</MonoNum>
+          <div style={{ fontSize: 12.5, color: T.muted, marginTop: 4 }}>carries forward every month</div>
+        </Card>
+        <Card>
+          <Eyebrow>Spent this month</Eyebrow>
+          <MonoNum size={24}>{fmtRM(thisMonthSpend)}</MonoNum>
+          <div style={{ fontSize: 12.5, color: T.muted, marginTop: 4 }}>
+            {pool.topup > 0 ? `${fmtRM(Math.max(0, pool.topup - thisMonthSpend))} of this month's top-up left` : "set a top-up below"}
+          </div>
+        </Card>
+        <Card>
+          <Eyebrow>All-time in / out</Eyebrow>
+          <div style={{ display: "flex", gap: 14 }}>
+            <div><div style={{ fontSize: 11, color: T.muted }}>In</div><MonoNum size={18} color={T.pineMid}>{fmtRM(totalIn)}</MonoNum></div>
+            <div><div style={{ fontSize: 11, color: T.muted }}>Out</div><MonoNum size={18} color={T.red}>{fmtRM(totalOut)}</MonoNum></div>
+          </div>
+        </Card>
+      </div>
+
+      {/* Settings */}
+      <Card>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 8 }}>
+          <div>
+            <Eyebrow>Monthly top-up</Eyebrow>
+            {!editTopup ? (
+              <div style={{ display: "flex", alignItems: "baseline", gap: 10 }}>
+                <MonoNum size={20}>{pool.topup > 0 ? fmtRM(pool.topup) : "Not set"}</MonoNum>
+                {pool.topup > 0 && <span style={{ fontSize: 12.5, color: T.muted }}>added on the 1st, from {monthLabel(pool.startMonth)}</span>}
+              </div>
+            ) : (
+              <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "flex-end", marginTop: 4 }}>
+                <Field label="Amount each month (RM)"><input value={topupDraft} inputMode="decimal" onChange={(e) => setTopupDraft(e.target.value)} style={{ ...inputStyle, fontFamily: T.mono }} /></Field>
+                <Field label="Started from"><input type="month" value={startDraft} onChange={(e) => setStartDraft(e.target.value)} style={inputStyle} /></Field>
+                <Btn small onClick={saveSettings}><Icon name="check" size={13} /> Save</Btn>
+              </div>
+            )}
+          </div>
+          {!editTopup && <Btn kind="ghost" small onClick={() => { setTopupDraft(String(pool.topup || "")); setStartDraft(pool.startMonth || thisMonthConst()); setEditTopup(true); }}>Edit top-up</Btn>}
+        </div>
+        <div style={{ fontSize: 12, color: T.muted, marginTop: 10, lineHeight: 1.5 }}>
+          The app auto-adds the top-up for every month from the start date to today, so the balance is always current — you don't log the top-ups yourself. Just record what you spend from the debit account below.
+        </div>
+      </Card>
+
+      {/* Record spend */}
+      <Card>
+        <Eyebrow>Record a debit spend from the pool</Eyebrow>
+        <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "flex-end" }}>
+          <Field label="Date"><input type="date" value={spend.date} onChange={(e) => setSpend({ ...spend, date: e.target.value })} style={inputStyle} /></Field>
+          <Field label="What for"><input value={spend.desc} placeholder="e.g. School fees, groceries" onChange={(e) => setSpend({ ...spend, desc: e.target.value })} style={inputStyle} onKeyDown={(e) => e.key === "Enter" && addSpend()} /></Field>
+          <Field label="Amount (RM)"><input value={spend.amount} inputMode="decimal" placeholder="0.00" onChange={(e) => setSpend({ ...spend, amount: e.target.value })} style={{ ...inputStyle, fontFamily: T.mono }} onKeyDown={(e) => e.key === "Enter" && addSpend()} /></Field>
+          <Btn onClick={addSpend}><Icon name="arrow-down-circle" size={15} /> Record spend</Btn>
+        </div>
+      </Card>
+
+      {/* Passbook */}
+      <Card style={{ padding: 0, overflow: "hidden" }}>
+        <div style={{ padding: "14px 16px", borderBottom: `2px solid ${T.pine}` }}>
+          <Eyebrow>Pool passbook — running balance</Eyebrow>
+        </div>
+        {view.length === 0 ? (
+          <div style={{ padding: 28, textAlign: "center", color: T.muted, fontSize: 13.5 }}>
+            Set your monthly top-up above to start the pool, then record debit spends as they happen.
+          </div>
+        ) : (
+          <div style={{ overflowX: "auto" }}>
+            <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
+              <thead>
+                <tr style={{ color: T.muted, fontSize: 11, textTransform: "uppercase", letterSpacing: "0.06em" }}>
+                  <th style={{ textAlign: "left", padding: "8px 16px" }}>Date</th>
+                  <th style={{ textAlign: "left", padding: "8px 8px" }}>Detail</th>
+                  <th style={{ textAlign: "right", padding: "8px 8px" }}>In</th>
+                  <th style={{ textAlign: "right", padding: "8px 8px" }}>Out</th>
+                  <th style={{ textAlign: "right", padding: "8px 8px" }}>Balance</th>
+                  <th style={{ width: 40 }}></th>
+                </tr>
+              </thead>
+              <tbody>
+                {view.map((r) => {
+                  const isIn = r.type === "topup" || r.type === "adjust-in";
+                  return (
+                    <tr key={r.id} style={{ borderTop: `1px solid ${T.line}`, background: isIn ? T.pineSoft + "55" : "transparent" }}>
+                      <td style={{ padding: "9px 16px", fontFamily: T.mono, fontSize: 12, whiteSpace: "nowrap" }}>{r.date}</td>
+                      <td style={{ padding: "9px 8px", fontWeight: 500 }}>
+                        {r.desc}{r.auto && <span style={{ marginLeft: 6, fontSize: 10.5, color: T.pineMid, background: T.pineSoft, borderRadius: 99, padding: "1px 7px", fontWeight: 700 }}>AUTO</span>}
+                      </td>
+                      <td style={{ padding: "9px 8px", textAlign: "right", fontFamily: T.mono, color: T.pineMid, fontWeight: 600, fontVariantNumeric: "tabular-nums" }}>{isIn ? fmtRM(r.amount) : ""}</td>
+                      <td style={{ padding: "9px 8px", textAlign: "right", fontFamily: T.mono, color: T.red, fontWeight: 600, fontVariantNumeric: "tabular-nums" }}>{!isIn ? fmtRM(r.amount) : ""}</td>
+                      <td style={{ padding: "9px 8px", textAlign: "right", fontFamily: T.mono, fontWeight: 700, fontVariantNumeric: "tabular-nums", color: r.run < 0 ? T.red : T.ink, whiteSpace: "nowrap" }}>{fmtRM(r.run)}</td>
+                      <td style={{ padding: "9px 8px", textAlign: "right" }}>
+                        <button onClick={() => removeRow(r)} style={{ background: "none", border: "none", cursor: "pointer" }} title={r.auto ? "Skip this month's top-up" : "Delete"}>
+                          <Icon name="trash2" size={14} color={T.muted} />
+                        </button>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </Card>
+    </div>
+  );
+}
+
+// ---------- Net Worth ----------
+function NetWorth({ data, update, assetsTotal, liabTotal, netWorth }) {
+  const ASSET_TYPES = ["Cash & Savings", "EPF", "Investments (ASB, unit trusts, stocks)", "Property", "Business interests", "Other"];
+  const [af, setAf] = useState({ name: "", type: ASSET_TYPES[0], value: "" });
+  const [lf, setLf] = useState({ name: "", value: "" });
+
+  const addAsset = () => {
+    const v = parseAmount(af.value);
+    if (!af.name.trim() || v === null) return;
+    update((d) => { d.assets.push({ id: uid(), name: af.name.trim(), type: af.type, value: v }); return d; });
+    setAf({ name: "", type: af.type, value: "" });
+  };
+  const addLiab = () => {
+    const v = parseAmount(lf.value);
+    if (!lf.name.trim() || v === null) return;
+    update((d) => { d.liabilities.push({ id: uid(), name: lf.name.trim(), value: v }); return d; });
+    setLf({ name: "", value: "" });
+  };
+  const takeSnapshot = () => {
+    update((d) => {
+      const m = thisMonth();
+      d.snapshots = d.snapshots.filter((s) => s.month !== m);
+      d.snapshots.push({ month: m, assets: assetsTotal, liabilities: liabTotal, net: netWorth });
+      d.snapshots.sort((a, b) => a.month.localeCompare(b.month));
+      return d;
+    });
+  };
+
+  const EditableRow = ({ item, listKey }) => (
+    <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "8px 0", borderTop: `1px solid ${T.line}` }}>
+      <div style={{ flex: 1 }}>
+        <div style={{ fontWeight: 600, fontSize: 13.5 }}>{item.name}</div>
+        {item.type && <div style={{ fontSize: 11.5, color: T.muted }}>{item.type}</div>}
+      </div>
+      <input
+        key={item.id + "-" + item.value}
+        defaultValue={item.value}
+        inputMode="decimal"
+        onBlur={(e) => update((d) => {
+          const it = d[listKey].find((x) => x.id === item.id);
+          if (it) it.value = parseAmount(e.target.value) ?? it.value;
+          return d;
+        })}
+        onKeyDown={(e) => e.key === "Enter" && e.target.blur()}
+        style={{ ...inputStyle, width: 130, fontFamily: T.mono, textAlign: "right" }}
+      />
+      <button onClick={() => update((d) => { d[listKey] = d[listKey].filter((x) => x.id !== item.id); return d; })} style={{ background: "none", border: "none", cursor: "pointer" }}><Icon name="trash2" size={14} color={T.muted} /></button>
+    </div>
+  );
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", gap: 12 }}>
+        <Card><Eyebrow>Total assets</Eyebrow><MonoNum size={24} color={T.pineMid}>{fmtRM(assetsTotal)}</MonoNum></Card>
+        <Card><Eyebrow>Total liabilities</Eyebrow><MonoNum size={24} color={T.red}>{fmtRM(liabTotal)}</MonoNum></Card>
+        <Card style={{ borderColor: T.pine, borderWidth: 2 }}><Eyebrow>Net worth</Eyebrow><MonoNum size={24} color={netWorth < 0 ? T.red : T.ink}>{fmtRM(netWorth)}</MonoNum></Card>
+      </div>
+
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(300px, 1fr))", gap: 12 }}>
+        <Card>
+          <Eyebrow>Assets</Eyebrow>
+          {data.assets.map((a) => <EditableRow key={a.id} item={a} listKey="assets" />)}
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 12, alignItems: "flex-end" }}>
+            <Field label="Name"><input value={af.name} placeholder="e.g. Maybank savings" onChange={(e) => setAf({ ...af, name: e.target.value })} style={inputStyle} /></Field>
+            <Field label="Type">
+              <select value={af.type} onChange={(e) => setAf({ ...af, type: e.target.value })} style={inputStyle}>
+                {ASSET_TYPES.map((t) => <option key={t}>{t}</option>)}
+              </select>
+            </Field>
+            <Field label="Value (RM)"><input value={af.value} inputMode="decimal" onChange={(e) => setAf({ ...af, value: e.target.value })} style={{ ...inputStyle, fontFamily: T.mono }} /></Field>
+            <Btn small onClick={addAsset}><Icon name="plus" size={13} /> Add</Btn>
+          </div>
+        </Card>
+        <Card>
+          <Eyebrow>Liabilities</Eyebrow>
+          {data.liabilities.map((l) => <EditableRow key={l.id} item={l} listKey="liabilities" />)}
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 12, alignItems: "flex-end" }}>
+            <Field label="Name"><input value={lf.name} placeholder="e.g. Card balance, money owed (loans go below)" onChange={(e) => setLf({ ...lf, name: e.target.value })} style={inputStyle} /></Field>
+            <Field label="Balance (RM)"><input value={lf.value} inputMode="decimal" onChange={(e) => setLf({ ...lf, value: e.target.value })} style={{ ...inputStyle, fontFamily: T.mono }} /></Field>
+            <Btn small onClick={addLiab}><Icon name="plus" size={13} /> Add</Btn>
+          </div>
+        </Card>
+      </div>
+
+      <LoansSection data={data} update={update} />
+
+      <Card>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 8 }}>
+          <Eyebrow>Monthly snapshots — track the trend</Eyebrow>
+          <Btn kind="ghost" small onClick={takeSnapshot}><Icon name="landmark" size={13} /> Save {monthLabel(thisMonth())} snapshot</Btn>
+        </div>
+        {data.snapshots.length === 0 ? (
+          <div style={{ color: T.muted, fontSize: 13, marginTop: 8 }}>
+            Save a snapshot once a month (e.g. after payday) to build a net worth trend over time.
+          </div>
+        ) : (
+          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13, marginTop: 8 }}>
+            <thead>
+              <tr style={{ color: T.muted, fontSize: 11, textTransform: "uppercase", letterSpacing: "0.06em" }}>
+                <th style={{ textAlign: "left", padding: "6px 0" }}>Month</th>
+                <th style={{ textAlign: "right" }}>Assets</th>
+                <th style={{ textAlign: "right" }}>Liabilities</th>
+                <th style={{ textAlign: "right" }}>Net worth</th>
+                <th style={{ textAlign: "right" }}>Change</th>
+              </tr>
+            </thead>
+            <tbody>
+              {[...data.snapshots].reverse().map((s, i, arr) => {
+                const prev = arr[i + 1];
+                const delta = prev ? s.net - prev.net : null;
+                return (
+                  <tr key={s.month} style={{ borderTop: `1px solid ${T.line}`, fontFamily: T.mono, fontVariantNumeric: "tabular-nums" }}>
+                    <td style={{ padding: "8px 0", fontWeight: 600 }}>{monthLabel(s.month)}</td>
+                    <td style={{ textAlign: "right" }}>{fmtRM(s.assets)}</td>
+                    <td style={{ textAlign: "right", color: T.red }}>{fmtRM(s.liabilities)}</td>
+                    <td style={{ textAlign: "right", fontWeight: 700 }}>{fmtRM(s.net)}</td>
+                    <td style={{ textAlign: "right", color: delta === null ? T.muted : delta >= 0 ? T.pineMid : T.red }}>
+                      {delta === null ? "—" : (delta >= 0 ? "+" : "") + fmtRM(delta).replace("RM ", "RM ")}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        )}
+      </Card>
+    </div>
+  );
+}
+
+
+// --- Mount ---
+const rootEl = document.getElementById("root");
+rootEl.innerHTML = "";
+ReactDOM.createRoot(rootEl).render(React.createElement(FamilyFinanceHub));
+</script>
+</body>
+</html>
